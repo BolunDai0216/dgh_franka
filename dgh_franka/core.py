@@ -19,6 +19,7 @@ class FrankaDynamicGraphHead:
         logging=True,
         max_log_count=1e7,
         plotter_port=5555,
+        control_interface="velocity",
     ):
         self.controller = None
         self.plotter_port = plotter_port
@@ -32,6 +33,9 @@ class FrankaDynamicGraphHead:
         self.log_data = []
         self.pause = True
         self.cmd_log = np.zeros(7)
+
+        # only velocity and torque
+        self.control_interface = control_interface
 
     def thread(self):
         while self.running:
@@ -89,9 +93,13 @@ class FrankaDynamicGraphHead:
         assert (
             max(cmd.shape) == 7
         ), "The control command should be a vector of 7 numbers!"
+
         # Write the sensor values to the shared memory
-        #         self.head.set_control("ctrl_joint_torques", cmd.reshape(7,1))
-        self.head.set_control("ctrl_joint_velocities", cmd.reshape(7, 1))
+
+        if self.control_interface == "torque":
+            self.head.set_control("ctrl_joint_torques", cmd.reshape(7, 1))
+        elif self.control_interface == "velocity":
+            self.head.set_control("ctrl_joint_velocities", cmd.reshape(7, 1))
 
         self.head.set_control(
             "ctrl_stamp", np.array(self.trigger_timestamp).reshape(1, 1) / 1000000
