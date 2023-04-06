@@ -7,7 +7,7 @@ import lcm
 import numpy as np
 import zmq  # Import the communication libs for connecting to the plotJuggler
 
-from dgh_franka import ipc_trigger_t
+from dgh_franka.ipc_trigger_t import ipc_trigger_t
 
 
 class FrankaDynamicGraphHead:

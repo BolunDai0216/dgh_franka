@@ -1,2 +1,1 @@
 from dgh_franka.core import FrankaDynamicGraphHead
-from dgh_franka.ipc_trigger_t import ipc_trigger_t
