@@ -1,22 +1,13 @@
-# Add the path to the compiled dgm and dgh packages
-import sys
-
-sys.path.append("/usr/local/lib/python3/dist-packages/")
 import json
-import math
 import threading
 from time import sleep
 
-# Import DGM and math libs
 import dynamic_graph_manager_cpp_bindings
 import lcm
 import numpy as np
+import zmq  # Import the communication libs for connecting to the plotJuggler
 
-# Import the communication libs for connecting to the plotJuggler
-import zmq
-
-# Import libs for communicating with the LCM sychronization messages from the DGM
-from lcm_msgs import ipc_trigger_t
+from dgh_franka import ipc_trigger_t
 
 
 class FrankaDynamicGraphHead:
