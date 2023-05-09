@@ -13,143 +13,99 @@ from dgh_franka.ipc_trigger_t import ipc_trigger_t
 class FrankaDynamicGraphHead:
     def __init__(
         self,
-        robot_config,
-        ds_ratio=10,
-        plotting=True,
-        logging=True,
-        max_log_count=1e7,
+        robot_interface_config,
+        plotting=False,
         plotter_port=5555,
-        control_interface="velocity",
     ):
-        self.controller = None
         self.plotter_port = plotter_port
-        self.robot_config = robot_config
-        self.ds_ratio = ds_ratio
-        self.trigger_counter = 0
-        self.logging = logging
-        self.max_log_count = max_log_count
-        self.logging = logging
         self.plotting = plotting
-        self.log_data = []
-        self.pause = True
-        self.cmd_log = np.zeros(7)
+        self.state = None
+        self.trigger_timestamp = 0
+        #Extract the robot information from the config file        
+        with open(robot_interface_config, 'r') as f:
+            robot_config = yaml.safe_load(f)
 
-        # only velocity and torque
-        self.control_interface = control_interface
+        self.robot_config = robot_config
+        robot_name = robot_config['device']['name']
+        self.lcm_trigger_toppic = f'{robot_name}_trigger'
+        self.cmd_dim = \
+        [v['size'] for v in robot_config['device']['controls'].values()][1]
+        self.robot_sensors = list(robot_config['device']['sensors'].keys())
+        self.robot_cmd = list(robot_config['device']['controls'].keys())[1]
 
-    def thread(self):
-        while self.running:
-            self.lc.handle()
-
-    def start(self):
-        print("Starting the Thread ...")
-        # initial_states can be used by the controller
         # Instantiate a Dynamic Graph Head (DGH) class to connect to the robot
-        self.head = dynamic_graph_manager_cpp_bindings.DGMHead(self.robot_config)
-        self.log_data = []
-        self.trigger_counter = 0
-        self.initial_states = self.read_states()
+        self.head = dynamic_graph_manager_cpp_bindings.DGMHead(robot_interface_config)
 
+        # Threading Interface for getting sync triggers from the DGM over LCM
+        self.trigger_msg = ipc_trigger_t()
+        self.lc = lcm.LCM()
+        self.subscription = self.lc.subscribe(
+            self.lcm_trigger_toppic, self.trigger_callback
+        )
+        self.subscription.set_queue_capacity(1)
+        self.running = True
+        self.lcm_thread = threading.Thread(target=self.LCMThreadFunc)
+        self.lcm_thread.start()
+        # Enable the ZMQ interface for the PlotJuggler
         if self.plotting:
             # Interface for plotting and logging the data
             self.context = zmq.Context()
             self.socket = self.context.socket(zmq.PUB)
             self.socket.bind(f"tcp://*:{self.plotter_port}")
-
-        # Interface for getting sync triggers from the DGM over LCM
-        self.msg = ipc_trigger_t()
-        self.lc = lcm.LCM()
-        self.subscription = self.lc.subscribe(
-            "dgm_franka_control_trigger", self.trigger_callback
-        )
-        self.subscription.set_queue_capacity(1)
-
-        self.running = True
-        self.lcm_thread = threading.Thread(target=self.thread)
-        self.lcm_thread.start()
         sleep(0.2)
-        print("Tread Started!")
+        print("Interface Running...")
+
+
+    def LCMThreadFunc(self):
+
+        while self.running:
+            rfds, wfds, efds = select.select([self.lc.fileno()], [], [], 0.5)
+            if rfds: # Handle only if there are data in the interface file
+                self.lc.handle()
+
+    def trigger_callback(self, channel, data):
+        msg = ipc_trigger_t.decode(data)
+        self.trigger_timestamp = \
+            np.array(msg.timestamp).reshape(1, 1) / 1000000
+        self.update()
+    
+    def update(self):
+        # Get the sensor values from the shared memory
+        self.head.read()
+        self.state = {sensor:self.head.get_sensor(sensor).copy() 
+                 for sensor in self.robot_sensors}
+        
+    def readJoints(self):
+        if time.time()-self.trigger_timestamp > 0.2:
+            self.state = None
+            return None
+        else:
+            return self.state
+
+    def setCommand(self, cmd):
+        self.head.set_control(self.robot_cmd, cmd.reshape(self.cmd_dim, 1))
+        self.head.set_control("ctrl_stamp", np.array(self.trigger_timestamp).reshape(1, 1))
+        self.head.write()
+        self.cmd_log = cmd
+    
+    def plotterUpdate(self):
+        assert self.plotter, 'Plotter interface is not enabled.'
+        if self.state is not None:
+            state = {k:v.tolist() for k,v in self.state.item()}
+            data = {
+                    "timestamp": self.trigger_timestamp,
+                    "cmd": self.cmd_log.tolist(),
+                    "robot_states": state,
+                    }
+            self.socket.send_string(json.dumps(data))
 
     def close(self):
-        print("Stopping the thread ...")
         self.running = False
         self.controller = None
         self.lcm_thread.join()
         self.lc.unsubscribe(self.subscription)
-        self.socket.close()
+        if self.plotting:
+            self.socket.close()
         del self.lc
         del self.head
-        print("Thread stopped!")
-
-    def read_states(self):
-        # Get the sensor values from the shared memory
-        self.head.read()
-        T = self.head.get_sensor("joint_torques").copy()
-        q = self.head.get_sensor("joint_positions").copy()
-        dq = self.head.get_sensor("joint_velocities").copy()
-        return [q, dq, T]
-
-    def write_command(self, cmd):
-        assert (
-            max(cmd.shape) == 7
-        ), "The control command should be a vector of 7 numbers!"
-
-        # Write the sensor values to the shared memory
-
-        if self.control_interface == "torque":
-            self.head.set_control("ctrl_joint_torques", cmd.reshape(7, 1))
-        elif self.control_interface == "velocity":
-            self.head.set_control("ctrl_joint_velocities", cmd.reshape(7, 1))
-
-        self.head.set_control(
-            "ctrl_stamp", np.array(self.trigger_timestamp).reshape(1, 1) / 1000000
-        )
-        self.head.write()
-        self.cmd_log = cmd
-
-    def generate_plot_data(self, state, cmd):
-        q, dq, T = state
-        data = {
-            "timestamp": self.trigger_timestamp,
-            "cmd": cmd.tolist(),
-            "robot_states": {"q": q.tolist(), "dq": dq.tolist(), "torques": T.tolist()},
-        }
-        return data
-
-    def trigger_callback(self, channel, data):
-        msg = ipc_trigger_t.decode(data)
-        self.trigger_timestamp = msg.timestamp
-        self.trigger_counter += 1
-
-        if self.trigger_counter % self.ds_ratio == 0:
-            state = self.read_states()
-
-            if self.controller is not None and self.pause == False:
-                cmd = self.controller(
-                    self.trigger_timestamp / 1000000.0, state, self.initial_states
-                )
-                self.write_command(cmd)
-            else:
-                cmd = np.zeros(7)
-
-            if self.plotting:
-                data = self.generate_plot_data(state, self.cmd_log)
-                self.socket.send_string(json.dumps(data))
-
-            if (
-                self.logging
-                and self.trigger_counter / self.ds_ratio < self.max_log_count
-            ):
-                self.log_data.append(
-                    [state, self.cmd_log.copy(), self.trigger_timestamp]
-                )
-
-    def get_recorded_dataset(self):
-        states = []
-        for i in range(len(self.log_data[0][0])):
-            states.append(np.vstack([d[0][i] for d in self.log_data]))
-
-        cmds = np.vstack([d[1].T for d in self.log_data])
-        stamps = np.vstack([d[2] for d in self.log_data])
-
-        return stamps, states, cmds
+        print("Interface Closed.")
