@@ -1,1 +1,1 @@
-include dgh_franka/interface_configs
+include dgh_franka/interface_configs/*.yaml
