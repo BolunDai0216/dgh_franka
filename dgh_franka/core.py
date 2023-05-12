@@ -20,14 +20,27 @@ def getDataPath():
 class FrankaDynamicGraphHead:
     def __init__(
         self,
-        robot_interface_config,
+        robot_id,
+        interface_type,
         plotting=False,
         plotter_port=5555,
     ):
+        
         self.plotter_port = plotter_port
         self.plotting = plotting
         self.state = None
         self.trigger_timestamp = 0
+        # Get the path and names of the interface yaml files 
+        config_files_path = \
+        os.path.join(getDataPath(), 'interface_configs')
+        config_files = os.listdir(config_files_path)
+        # Extract the defined interfaces types
+        self.defined_interfaces = \
+        [f.split('fr3_')[1].split('.yaml')[0] for f in config_files]
+        # Make sure the chosen interface is defined
+        assert interface_type in self.defined_interfaces, \
+        f'interface can onely be {[i for i in self.defined_interfaces]}'
+        robot_interface_config = os.path.join(config_files_path,f'fr3_{interface_type}.yaml')
         #Extract the robot information from the config file        
         with open(robot_interface_config, 'r') as f:
             robot_config = yaml.safe_load(f)
