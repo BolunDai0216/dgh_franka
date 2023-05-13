@@ -1,1 +1,6 @@
 include dgh_franka/interface_configs/*.yaml
+include dgh_franka/robots/meshes/collision/*.stl
+include dgh_franka/robots/meshes/visual/*.mtl
+include dgh_franka/robots/meshes/visual/*.png
+include dgh_franka/robots/meshes/visual/*.obj
+include dgh_franka/robots/*.urdf
