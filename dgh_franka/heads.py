@@ -12,10 +12,8 @@ import zmq  # Import the communication libs for connecting to the plotJuggler
 import os
 
 from dgh_franka.ipc_trigger_t import ipc_trigger_t
+from dgh_franka import getDataPath
 
-def getDataPath():
-    resdir = os.path.join(os.path.dirname(__file__))
-    return resdir
 
 class FrankaDynamicGraphHead:
     def __init__(
