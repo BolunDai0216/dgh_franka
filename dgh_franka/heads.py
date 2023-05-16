@@ -1,26 +1,56 @@
+from dgh_franka import getDataPath
+from pinocchio.robot_wrapper import RobotWrapper
 import json
+import select
 import threading
+import time
 from time import sleep
 
 import dynamic_graph_manager_cpp_bindings
 import lcm
 import numpy as np
+import yaml
 import zmq  # Import the communication libs for connecting to the plotJuggler
 
 from dgh_franka.ipc_trigger_t import ipc_trigger_t
+import os
+import pinocchio as pin
+import copy
 
-
-class FrankaDynamicGraphHead:
+class FrankaDGH:
     def __init__(
         self,
-        robot_interface_config,
+        interface_type,
         plotting=False,
         plotter_port=5555,
     ):
+        
         self.plotter_port = plotter_port
         self.plotting = plotting
         self.state = None
         self.trigger_timestamp = 0
+        
+        # Pinocchio Robot
+        package_directory = getDataPath()
+        robot_URDF = package_directory + "/robots/fr3.urdf"
+        urdf_search_path = package_directory + "/robots"
+        self.robot = RobotWrapper.BuildFromURDF(robot_URDF, package_directory)
+        #End-effector frame id
+        self.EE_FRAME_ID = 26
+        # Get frame ID for grasp target
+        self.jacobian_frame = pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+
+        # Get the path and names of the interface yaml files 
+        config_files_path = \
+        os.path.join(getDataPath(), 'interface_configs')
+        config_files = os.listdir(config_files_path)
+        # Extract the defined interfaces types
+        self.defined_interfaces = \
+        [f.split('fr3_')[1].split('.yaml')[0] for f in config_files]
+        # Make sure the chosen interface is defined
+        assert interface_type in self.defined_interfaces, \
+        f'interface can onely be {[i for i in self.defined_interfaces]}'
+        robot_interface_config = os.path.join(config_files_path,f'fr3_{interface_type}.yaml')
         #Extract the robot information from the config file        
         with open(robot_interface_config, 'r') as f:
             robot_config = yaml.safe_load(f)
@@ -74,13 +104,32 @@ class FrankaDynamicGraphHead:
         self.head.read()
         self.state = {sensor:self.head.get_sensor(sensor).copy() 
                  for sensor in self.robot_sensors}
+        q = np.hstack([self.state['joint_positions'],np.zeros((2))])
+        dq = np.hstack([self.state['joint_velocities'],np.zeros((2))])
+        self.updatePinocchio(q,dq)
         
-    def readJoints(self):
+    def readStates(self):
+        """
+        state contains:
+        -------------------------------------
+        q: joint position
+        dq: joint velocity
+        f(x): drift
+        g(x): control influence matrix
+        G: gravitational vector
+        J_EE: end-effector Jacobian
+        dJ_EE: time derivative of end-effector Jacobian
+        pJ_EE: pseudo-inverse of end-effector Jacobian
+        R_EE: end-effector rotation matrix
+        P_EE: end-effector position vector
+        ---------------------------------------
+        Or None if no recent states are avialable
+        """
         if time.time()-self.trigger_timestamp > 0.2:
             self.state = None
             return None
         else:
-            return self.state
+            return self.robot_states
 
     def setCommand(self, cmd):
         self.head.set_control(self.robot_cmd, cmd.reshape(self.cmd_dim, 1))
@@ -108,4 +157,41 @@ class FrankaDynamicGraphHead:
             self.socket.close()
         del self.lc
         del self.head
-        print("Interface Closed.")
+        print("Interface Closed.")        
+
+    def updatePinocchio(self, q, dq):
+        self.robot.computeJointJacobians(q)
+        self.robot.framesForwardKinematics(q)
+        self.robot.centroidalMomentum(q, dq)
+        # Get Jacobian from grasp target frame
+        # preprocessing is done in get_state_update_pinocchio()
+        jacobian = self.robot.getFrameJacobian(self.EE_FRAME_ID, self.jacobian_frame)
+
+        # Get pseudo-inverse of frame Jacobian
+        pinv_jac = np.linalg.pinv(jacobian)
+
+        dJ = pin.getFrameJacobianTimeVariation(
+            self.robot.model, self.robot.data, self.EE_FRAME_ID, self.jacobian_frame
+        )
+        # Get dynamics 
+        Minv = pin.computeMinverse(self.robot.model, self.robot.data, q)
+        M = self.robot.mass(q)
+        nle = self.robot.nle(q, dq)
+        f = np.vstack((dq[:, np.newaxis], -Minv @ nle[:, np.newaxis]))
+        g = np.vstack((np.zeros((9, 9)), Minv))
+
+        self.robot_states = {
+                            "q": q,
+                            "dq": dq,
+                            "f(x)": f,
+                            "g(x)": g,
+                            "M(q)": M,
+                            "M(q)^{-1}": Minv,
+                            "nle": nle,
+                            "G": self.robot.gravity(q),
+                            "J_EE": jacobian,
+                            "dJ_EE": dJ,
+                            "pJ_EE": pinv_jac,
+                            "R_EE": copy.deepcopy(self.robot.data.oMf[self.EE_FRAME_ID].rotation),
+                            "P_EE": copy.deepcopy(self.robot.data.oMf[self.EE_FRAME_ID].translation),
+                        }
